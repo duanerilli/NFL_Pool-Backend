@@ -1,61 +1,44 @@
+// src/cron/scheduler.ts
 import 'dotenv/config';
-import cron from 'node-cron';
-import { exec } from 'child_process';
-import { supabaseAdmin as supabase } from '../supa';
-import { getCurrentWeek } from '../utils/week';
+import { autoPhaseWeek, type Phase } from '../utils/week';
+import { spawn } from 'child_process';
 
-const SEASON = process.env.CURRENT_SEASON || String(new Date().getFullYear());
-
-function sh(cmd: string) {
-  console.log('→', cmd);
-  const child = exec(cmd, { env: process.env });
-  child.stdout?.on('data', d => process.stdout.write(d));
-  child.stderr?.on('data', d => process.stderr.write(d));
-  return child;
+function run(cmd: string, args: string[]) {
+  return new Promise<void>((resolve, reject) => {
+    const p = spawn(cmd, args, { stdio: 'inherit', shell: process.platform === 'win32' });
+    p.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`${cmd} ${args.join(' ')} exited ${code}`))));
+  });
 }
 
-// Decide a reasonable “settle week”: usually the week before current
-async function getSettleWeek(): Promise<number> {
-  const curr = await getCurrentWeek();
-  return Math.max(1, Number(curr) - 1);
-}
+async function main() {
+  const season = String(new Date().getFullYear());
 
-// Sync the current week (and optionally previous, just in case)
-async function runSyncJobs() {
-  try {
-    const curr = await getCurrentWeek();
-    sh(`npm run sync:week -- ${SEASON} ${curr}`);
-    // also sync previous week (late score corrections)
-    if (curr > 1) sh(`npm run sync:week -- ${SEASON} ${curr - 1}`);
-  } catch (e) {
-    console.error('sync job error:', e);
+  // Detect current phase/week from DB
+  const auto = await autoPhaseWeek();
+  const phase: Phase = auto.phase;     // 'pre' | 'reg' | 'post'
+  const curr = auto.week;
+
+  console.log('🕑 Cron scheduler started.', { season, phase, week: curr });
+
+  const currLabel = `${phase.toUpperCase()}${curr}`;
+
+  // A) Sync current label
+  console.log(`[cron] syncing ${season} ${currLabel}`);
+  await run('npx', ['tsx', 'src/scripts/syncGames.ts', season, currLabel]);
+
+  // B) Optionally settle previous week in same phase
+  if (curr > 1) {
+    const prevLabel = `${phase.toUpperCase()}${curr - 1}`;
+    console.log(`[cron] settling ${season} ${prevLabel}`);
+    await run('npx', ['tsx', 'src/scripts/settlePicks.ts', season, prevLabel]);
+  } else {
+    console.log('[cron] no previous week to settle');
   }
+
+  console.log('✅ Cron finished.');
 }
 
-// Settle weeks that should be final (previous week by default)
-async function runSettleJobs() {
-  try {
-    const settleWeek = await getSettleWeek();
-    sh(`npm run settle:week -- ${SEASON} ${settleWeek}`);
-  } catch (e) {
-    console.error('settle job error:', e);
-  }
-}
-
-// ── Schedules ────────────────────────────────────────────────────────────────
-// Every 15 minutes: keep current/previous week synced
-cron.schedule('*/15 * * * *', () => {
-  console.log('[cron] sync tick');
-  runSyncJobs();
+main().catch((e) => {
+  console.error('[cron] error:', e);
+  process.exit(1);
 });
-
-// Every day at 02:00 local: settle previous week
-cron.schedule('0 2 * * *', () => {
-  console.log('[cron] settle tick');
-  runSettleJobs();
-});
-
-// Optional: also settle hourly (helpful on game days)
-// cron.schedule('0 * * * *', () => { console.log('[cron] hourly settle'); runSettleJobs(); });
-
-console.log('🕑 Cron scheduler started. Season =', SEASON);

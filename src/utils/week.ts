@@ -1,10 +1,47 @@
+// src/utils/week.ts
 import { supabaseAdmin as supabase } from '../supa';
 
-type Phase = 'pre' | 'reg' | 'post';
+export type Phase = 'pre' | 'reg' | 'post';
 
-async function nextFutureWeek(phase: Phase): Promise<number | null> {
+/** Auto-detect the active phase/week based on the next kickoff in DB. */
+export async function autoPhaseWeek(): Promise<{ phase: Phase; week: number }> {
   const nowISO = new Date().toISOString();
-  const { data, error } = await supabase
+
+  // 1) Try the next future kickoff among all phases
+  const { data: next } = await supabase
+    .from('games')
+    .select('phase, week, start_time')
+    .gt('start_time', nowISO)
+    .order('start_time', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (next?.phase && typeof next.week === 'number') {
+    return { phase: next.phase as Phase, week: next.week };
+  }
+
+  // 2) Fallback: the max regular week present
+  const { data: maxReg } = await supabase
+    .from('games')
+    .select('week')
+    .eq('phase', 'reg')
+    .order('week', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (typeof maxReg?.week === 'number') {
+    return { phase: 'reg', week: maxReg.week };
+  }
+
+  // 3) Safe fallback
+  return { phase: 'reg', week: 1 };
+}
+
+/** Returns the next future game's week for the given phase (default 'reg'). */
+export async function getCurrentWeek(phase: Phase = 'reg'): Promise<number> {
+  const nowISO = new Date().toISOString();
+
+  const { data: next } = await supabase
     .from('games')
     .select('week, start_time')
     .eq('phase', phase)
@@ -12,51 +49,16 @@ async function nextFutureWeek(phase: Phase): Promise<number | null> {
     .order('start_time', { ascending: true })
     .limit(1)
     .maybeSingle();
-  if (error) throw error;
-  return data?.week ?? null;
-}
 
-async function maxWeek(phase: Phase): Promise<number | null> {
-  const { data, error } = await supabase
+  if (next?.week) return next.week;
+
+  const { data: maxRow } = await supabase
     .from('games')
     .select('week')
     .eq('phase', phase)
     .order('week', { ascending: false })
     .limit(1)
     .maybeSingle();
-  if (error) throw error;
-  return data?.week ?? null;
-}
 
-/** Return the “best” phase+week to use right now, based on DB contents. */
-export async function autoPhaseWeek(): Promise<{ phase: Phase; week: number }> {
-  // Prefer the next future REGULAR-season week
-  const regNext = await nextFutureWeek('reg');
-  if (regNext) return { phase: 'reg', week: regNext };
-
-  // Otherwise, if PRE has upcoming games (useful before kickoff), use that
-  const preNext = await nextFutureWeek('pre');
-  if (preNext) return { phase: 'pre', week: preNext };
-
-  // Otherwise, if POST has upcoming games, use that
-  const postNext = await nextFutureWeek('post');
-  if (postNext) return { phase: 'post', week: postNext };
-
-  // No future games? Fall back to the highest available REG week, then PRE, then POST
-  const regMax = await maxWeek('reg');
-  if (regMax) return { phase: 'reg', week: regMax };
-
-  const preMax = await maxWeek('pre');
-  if (preMax) return { phase: 'pre', week: preMax };
-
-  const postMax = await maxWeek('post');
-  if (postMax) return { phase: 'post', week: postMax };
-
-  // Absolute fallback
-  return { phase: 'reg', week: 1 };
-}
-
-/** If you explicitly want “current week for a given phase” */
-export async function getCurrentWeek(phase: Phase): Promise<number> {
-  return (await nextFutureWeek(phase)) ?? (await maxWeek(phase)) ?? 1;
+  return maxRow?.week ?? 1;
 }
