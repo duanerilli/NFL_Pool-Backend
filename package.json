@@ -15,7 +15,7 @@
     "license": "ISC",
     "description": "",
     "dependencies": {
-        "@supabase/supabase-js": "^2.56.1",
+        "@supabase/supabase-js": "^2.57.0",
         "axios": "^1.10.0",
         "cors": "^2.8.5",
         "dotenv": "^17.2.0",
