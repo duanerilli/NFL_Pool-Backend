@@ -6,7 +6,22 @@ import 'dotenv/config';
 import { supabaseAdmin as supabase } from '../supa';
 
 type Phase = 'pre' | 'reg' | 'post';
+type UUID = string;
 const RAPID_HOST = 'api-american-football.p.rapidapi.com';
+
+interface GameRow {
+  season: number;
+  phase: Phase;              // 'pre' | 'reg' | 'post'
+  week: number;
+  start_time: string;        // ISO
+  home_team_id: UUID;
+  away_team_id: UUID;
+  home_score: number | null;
+  away_score: number | null;
+  status: string;            // 'scheduled' | 'in_progress' | 'final' | etc.
+  rapidapi_source: string;   // 'api-american-football'
+  rapidapi_game_id: string;  // provider game id
+}
 
 // ---------- helpers ----------
 function parseLabel(label: string): { phase: Phase; week: number } {
@@ -144,46 +159,39 @@ async function main() {
   // Map team NAME -> UUID
   const { data: teams, error: tErr } = await supabase.from('teams').select('id, name');
   if (tErr) throw tErr;
-  const nameToId = new Map((teams ?? []).map((t) => [normName(t.name), t.id]));
+  // Make this a Map<string, string>
+const nameToId = new Map<string, string>(
+  (teams ?? []).map((t: { id: string; name: string }) => [normName(t.name), t.id]));
 
-  const rows = [];
+  const rows: GameRow[] = [];
+
   for (const n of weekGames) {
     const hId = nameToId.get(normName(n.homeName));
     const aId = nameToId.get(normName(n.awayName));
-
+  
     if (!n.rid || !hId || !aId) {
-      console.warn('Skipping game (missing mapping):', {
-        rid: n.rid,
-        weekRaw: n.weekRaw,
-        week: n.weekNorm,
-        homeName: n.homeName,
-        awayName: n.awayName,
-      });
+      console.warn('Skipping game (missing name mapping):', n);
       continue;
     }
-
+  
     const startISO = n.epoch ? new Date(n.epoch * 1000).toISOString() : new Date().toISOString();
+  
     const derivedStatus = deriveStatus(n.rawStatus, n.epoch, n.homeScore, n.awayScore);
-    const hs = typeof n.homeScore === 'object' ? n.homeScore?.total ?? null : n.homeScore;
-    const as = typeof n.awayScore === 'object' ? n.awayScore?.total ?? null : n.awayScore;
-
+    const hs = typeof n.homeScore === 'object' ? n.homeScore?.total ?? null : (n.homeScore ?? null);
+    const as = typeof n.awayScore === 'object' ? n.awayScore?.total ?? null : (n.awayScore ?? null);
+  
     rows.push({
-      // identity from provider for upsert
-      rapidapi_source: 'api-american-football',
-      rapidapi_game_id: n.rid,
-
-      // always set these so filters work later
-      season,                 // ✅
-      phase,                  // ✅ 'pre' | 'reg' | 'post'
-      week,                   // ✅ numeric
-
-      // game data
+      season: Number(season),             // ensure number
+      phase,                              // from parseLabel or your phase var
+      week: Number(n.week) || Number(targetWeek),
       start_time: startISO,
-      home_team_id: hId,
-      away_team_id: aId,
+      home_team_id: hId as UUID,
+      away_team_id: aId as UUID,
       home_score: hs,
       away_score: as,
       status: derivedStatus,
+      rapidapi_source: 'api-american-football',
+      rapidapi_game_id: String(n.rid),
     });
   }
 
@@ -196,9 +204,9 @@ async function main() {
   //   create unique index if not exists ux_games_source_id
   //   on public.games (rapidapi_source, rapidapi_game_id);
   const { error: upErr } = await supabase
-    .from('games')
-    .upsert(rows, { onConflict: 'rapidapi_source,rapidapi_game_id' });
-  if (upErr) throw upErr;
+  .from('games')
+  .upsert(rows as GameRow[], { onConflict: 'rapidapi_source,rapidapi_game_id' });
+if (upErr) throw upErr;
 
   console.log(`Synced ${rows.length} games for ${labelArg}, season ${season}`);
 }
